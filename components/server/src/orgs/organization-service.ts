@@ -10,6 +10,7 @@ import {
     OrgMemberRole,
     Organization,
     OrganizationSettings,
+    TeamMemberRole,
     TeamMembershipInvite,
 } from "@gitpod/gitpod-protocol";
 import { IAnalyticsWriter } from "@gitpod/gitpod-protocol/lib/analytics";
@@ -284,6 +285,7 @@ export class OrganizationService {
         txCtx?: TransactionalContext,
     ): Promise<void> {
         await this.auth.checkPermissionOnOrganization(userId, "write_members", orgId);
+        const orgSettings = await this.getSettings(userId, orgId);
         let members: OrgMemberInfo[] = [];
         try {
             await this.teamDB.transaction(txCtx, async (teamDB, txCtx) => {
@@ -310,8 +312,12 @@ export class OrganizationService {
                     const isDataOps = await getExperimentsClientForBackend().getValueAsync("dataops", false, {
                         teamId: orgId,
                     });
+                    console.log("isDataOps", isDataOps);
+                    console.log("orgSettings.defaultRole", orgSettings.defaultRole);
                     if (isDataOps) {
                         role = "collaborator";
+                    } else if (orgSettings.defaultRole) {
+                        role = orgSettings.defaultRole;
                     }
                 }
                 await teamDB.setTeamMemberRole(memberId, orgId, role);
@@ -456,6 +462,9 @@ export class OrganizationService {
                 await this.ideService.checkEditorsAllowed(userId, settings.restrictedEditorNames);
             }
         }
+        if (settings.defaultRole && !TeamMemberRole.isValid(settings.defaultRole)) {
+            throw new ApplicationError(ErrorCodes.BAD_REQUEST, "Invalid default role");
+        }
         return this.toSettings(await this.teamDB.setOrgSettings(orgId, settings));
     }
 
@@ -475,6 +484,9 @@ export class OrganizationService {
         }
         if (settings.restrictedEditorNames) {
             result.restrictedEditorNames = settings.restrictedEditorNames;
+        }
+        if (settings.defaultRole) {
+            result.defaultRole = settings.defaultRole;
         }
         return result;
     }
