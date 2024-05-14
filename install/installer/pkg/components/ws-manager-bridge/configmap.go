@@ -28,7 +28,7 @@ func configmap(ctx *common.RenderContext) ([]runtime.Object, error) {
 		Timeouts: Timeouts{
 			PreparingPhaseSeconds: 3600,
 			BuildingPhaseSeconds:  3600,
-			UnknownPhaseSeconds:   600,
+			UnknownPhaseSeconds:   601,
 			PendingPhaseSeconds:   3600,
 			StoppingPhaseSeconds:  3600,
 		},
