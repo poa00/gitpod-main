@@ -66,22 +66,26 @@ func (c *Client) Send(ctx context.Context, req *protocol.Request) (*protocol.Res
 	}
 	req.ID = reqID + 1
 
-	data, err := yaml.Marshal(req)
+	data, err := req.Marshal()
 	if err != nil {
 		return nil, fmt.Errorf("error serializing request: %w", err)
 	}
-	resData, err := c.Transport.SendUnary(ctx, req.SessionID, req.ID, data)
+
+	mReq := transport.Message{
+		ID:   req.ID,
+		Data: data,
+	}
+	mRes, err := c.Transport.SendUnary(ctx, req.SessionID, &mReq)
 	if err != nil {
 		return nil, fmt.Errorf("error sending request: %w", err)
 	}
 
-	res := protocol.Response{}
-	err = yaml.Unmarshal(resData, &res)
+	res, err := protocol.UnmarshalResponse(mRes.Data)
 	if err != nil {
 		return nil, fmt.Errorf("error deserializing response: %w", err)
 	}
 
-	return &res, nil
+	return res, nil
 }
 
 func LoadClient(configPathArg string) (*Client, error) {

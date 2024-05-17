@@ -4,6 +4,8 @@
 
 package protocol
 
+import yaml "gopkg.in/yaml.v2"
+
 type Request struct {
 	SessionID string `yaml:"sessionID"`
 
@@ -20,6 +22,16 @@ type Request struct {
 
 	// Context is the context in which the request is executed
 	Context Context `yaml:"context"`
+}
+
+func (r *Request) Marshal() ([]byte, error) {
+	return yaml.Marshal(r)
+}
+
+func UnmarshalRequest(data []byte) (*Request, error) {
+	r := Request{}
+	err := yaml.Unmarshal(data, &r)
+	return &r, err
 }
 
 type CallType string
@@ -46,4 +58,14 @@ type Response struct {
 
 	// Output is the output of the command
 	Output string `yaml:"output"`
+}
+
+func (r *Response) Marshal() ([]byte, error) {
+	return yaml.Marshal(r)
+}
+
+func UnmarshalResponse(data []byte) (*Response, error) {
+	r := Response{}
+	err := yaml.Unmarshal(data, &r)
+	return &r, err
 }

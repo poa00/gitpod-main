@@ -5,16 +5,22 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v2"
 
 	"github.com/gitpod-io/gitpod/common-go/log"
+	"github.com/gitpod-io/gitpod/genie/pkg/protocol"
 	"github.com/gitpod-io/gitpod/genie/pkg/transport"
 )
+
+const DEFAULT_REQUEST_TIMEOUT = 5000
 
 type Config struct {
 	Transport transport.TransportConfig `yaml:"transport"`
@@ -125,4 +131,105 @@ func (h *SessionHandler) Run(ctx context.Context) {
 	log.Info("session started")
 	defer log.Info("session stopped")
 
+	requests, err := h.transport.WatchRequests(ctx, h.SessionID)
+	if err != nil {
+		log.WithError(err).WithField("sessionId", h.SessionID).Error("cannot watch requests")
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-requests:
+			log.WithField("requestId", msg.ID).Info("received request")
+
+			req, err := protocol.UnmarshalRequest(msg.Data)
+			if err != nil {
+				log.WithError(err).WithField("requestId", msg.ID).Error("cannot unmarshal request")
+				continue
+			}
+
+			go h.handleRequest(ctx, req)
+		}
+	}
+}
+
+func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Request) {
+	requestTimeout := req.Context.Timeout
+	if requestTimeout == 0 || requestTimeout > DEFAULT_REQUEST_TIMEOUT {
+		requestTimeout = DEFAULT_REQUEST_TIMEOUT
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(requestTimeout)*time.Millisecond)
+	defer cancel()
+
+	log := log.WithField("sessionId", h.SessionID).WithField("requestId", req.ID)
+	log.Info("handling request")
+
+	if req.Type != protocol.CallTypeUnary {
+		log.Error("unsupported request type")
+		return
+	}
+
+	// TODO(gpl) Support more :)
+	if req.Cmd != "kubectl" {
+		log.Error("unsupported command")
+		return
+	}
+
+	cmd := exec.Command("/usr/bin/kubectl", req.Args...)
+	stdoutBuf := bytes.Buffer{}
+	cmd.Stdout = &stdoutBuf
+
+	processDone := make(chan *os.ProcessState)
+	go func() {
+		defer close(processDone)
+		err := cmd.Run()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				processDone <- ee.ProcessState
+				return
+			}
+			log.WithError(err).Error("process failed badly")
+			return
+		}
+		processDone <- cmd.ProcessState
+	}()
+
+	var ps *os.ProcessState
+	select {
+	case <-ctx.Done():
+		log.Error("request timed out")
+		return
+	case ps = <-processDone:
+	}
+	if ps == nil {
+		log.Error("process did not finish")
+		return
+	}
+	log.WithField("exitCode", ps.ExitCode()).Info("process finished")
+
+	res := &protocol.Response{
+		RequestID:  req.ID,
+		SequenceID: 0,
+		ExitCode:   ps.ExitCode(),
+		Output:     stdoutBuf.String(),
+	}
+	data, err := res.Marshal()
+	if err != nil {
+		log.WithError(err).Error("error marshalling response")
+		return
+	}
+
+	mRes := transport.Message{
+		ID:         res.RequestID,
+		SequenceID: res.SequenceID,
+		Data:       data,
+	}
+	log.Info("sending response")
+	err = h.transport.SendResponse(ctx, h.SessionID, &mRes)
+	if err != nil {
+		log.WithError(err).Error("error sending response")
+		return
+	}
+	log.Info("response sent")
 }

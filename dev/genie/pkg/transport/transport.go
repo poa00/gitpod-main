@@ -14,9 +14,17 @@ type Transport interface {
 	HasSession(ctx context.Context, sessionId string) bool
 	WatchSessions(ctx context.Context) (<-chan string, error)
 	GetLastRequestID(ctx context.Context, sessionId string) (int, error)
+	WatchRequests(ctx context.Context, sessionId string) (<-chan *Message, error)
 
-	SendUnary(ctx context.Context, sessionId string, id int, data []byte) ([]byte, error)
-	SendStream(ctx context.Context, sessionId string, id int, data []byte) (<-chan []byte, error)
+	SendUnary(ctx context.Context, sessionId string, msg *Message) (*Message, error)
+	SendStream(ctx context.Context, sessionId string, msg *Message) (<-chan *Message, error)
+	SendResponse(ctx context.Context, sessionId string, msg *Message) error
+}
+
+type Message struct {
+	ID         int
+	SequenceID int
+	Data       []byte
 }
 
 type TransportConfig struct {

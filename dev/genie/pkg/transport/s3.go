@@ -36,14 +36,22 @@ func (t *S3Transport) WatchSessions(ctx context.Context) (<-chan string, error) 
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (t *S3Transport) WatchRequests(ctx context.Context, sessionId string) (<-chan *Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
 func (t *S3Transport) GetLastRequestID(ctx context.Context, sessionId string) (int, error) {
 	return 0, fmt.Errorf("not implemented")
 }
 
-func (t *S3Transport) SendUnary(ctx context.Context, sessionId string, id int, data []byte) ([]byte, error) {
-	return []byte{}, fmt.Errorf("not implemented")
+func (t *S3Transport) SendUnary(ctx context.Context, sessionId string, msg *Message) (*Message, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 
-func (t *S3Transport) SendStream(ctx context.Context, sessionId string, id int, data []byte) (<-chan []byte, error) {
+func (t *S3Transport) SendResponse(ctx context.Context, sessionId string, msg *Message) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (t *S3Transport) SendStream(ctx context.Context, sessionId string, msg *Message) (<-chan *Message, error) {
 	return nil, fmt.Errorf("not implemented")
 }

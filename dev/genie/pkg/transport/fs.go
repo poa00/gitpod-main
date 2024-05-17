@@ -9,11 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/gitpod-io/gitpod/common-go/log"
@@ -27,11 +28,17 @@ var _ Transport = &FSTransport{}
 
 type FSTransport struct {
 	Config *FSConfig
+
+	watchMutex       sync.Mutex
+	watcher          *fsnotify.Watcher
+	subscribersMutex sync.Mutex
+	subscribers      map[string]chan<- *fsnotify.Event
 }
 
 func NewFSTransport(cfg *FSConfig) (*FSTransport, error) {
 	return &FSTransport{
-		Config: cfg,
+		Config:      cfg,
+		subscribers: map[string]chan<- *fsnotify.Event{},
 	}, nil
 }
 
@@ -55,77 +62,142 @@ func (t *FSTransport) HasSession(ctx context.Context, sessionId string) bool {
 }
 
 func (t *FSTransport) WatchSessions(ctx context.Context) (<-chan string, error) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, fmt.Errorf("cannot create watcher: %w", err)
-	}
-
-	sessionsPath := t.sessionsPath()
-	err = watcher.Add(sessionsPath)
-	if err != nil {
-		watcher.Close()
-		return nil, fmt.Errorf("cannot watch sessions path: %w", err)
-	}
-
 	out := make(chan string)
-	go func() {
-		defer watcher.Close()
-		defer close(out)
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		// send initial list of dirs
-		entries, err := os.ReadDir(sessionsPath)
-		if err != nil {
-			log.WithError(err).Error("error reading sessions dir")
+	sessionsPath := t.sessionsPath()
+	err := t.addSubscriber(ctx, func(ev *fsnotify.Event) {
+		if !ev.Has(fsnotify.Create) {
 			return
 		}
+
+		dir, file := path.Split(ev.Name)
+		if dir == sessionsPath {
+			// directly under "sessions"? then it's a new session
+			out <- file
+		}
+	}, func() {
+		close(out)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot add subscriber: %w", err)
+	}
+
+	// send initial list of sessions
+	entries, err := os.ReadDir(sessionsPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read sessions directory: %w", err)
+	}
+	go func() {
 		for _, entry := range entries {
 			if entry.IsDir() {
 				out <- entry.Name()
 			}
 		}
+	}()
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev := <-watcher.Events:
-				if ev.Has(fsnotify.Create) {
-					dir, file := path.Split(ev.Name)
-					if dir == sessionsPath { // directly under "sessions"? then it's a new session
-						out <- file
-					}
-				}
-			case err := <-watcher.Errors:
-				log.WithError(err).Error("watcher error")
-				return
+	return out, err
+}
+
+func (t *FSTransport) WatchRequests(ctx context.Context, sessionId string) (<-chan *Message, error) {
+	out := make(chan *Message)
+
+	pushRequest := func(reqID int) {
+		fn := t.requestPath(sessionId, reqID)
+		bytes, err := os.ReadFile(fn)
+		if err != nil {
+			log.WithError(err).WithField("file", fn).Error("cannot read request file")
+			return
+		}
+		m := Message{
+			ID:   reqID,
+			Data: bytes,
+		}
+		out <- &m
+	}
+
+	err := t.addSubscriber(ctx, func(ev *fsnotify.Event) {
+		if !ev.Has(fsnotify.Create) {
+			return
+		}
+		reqID, err := parseRequestIdFromFilename(ev.Name)
+		if err != nil {
+			return
+		}
+
+		// We seem to have a new request here, now read the data
+		pushRequest(reqID)
+	}, func() {
+		close(out)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot add subscriber: %w", err)
+	}
+
+	// send initial list of requests (that don't have a response for, yet)
+	sessionPath := t.sessionPath(sessionId)
+	entries, err := os.ReadDir(sessionPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read sessions directory: %w", err)
+	}
+
+	allRequests := map[int]string{}
+	allResponses := map[int]string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		reqId, err := parseRequestIdFromFilename(entry.Name())
+		if err == nil {
+			if _, hasResponse := allResponses[reqId]; hasResponse {
+				continue
 			}
+			allRequests[reqId] = entry.Name()
+			continue
+		}
+		reqId, err = parseResponseIdFromFilename(entry.Name())
+		if err == nil {
+			allResponses[reqId] = entry.Name()
+			delete(allRequests, reqId)
+			continue
+		}
+	}
+
+	go func() {
+		for reqId, _ := range allRequests {
+			log.WithField("requestId", reqId).Info("pushing initial request")
+			pushRequest(reqId)
 		}
 	}()
 
-	return out, nil
+	return out, err
 }
 
-func (t *FSTransport) SendUnary(ctx context.Context, sessionId string, reqId int, data []byte) ([]byte, error) {
+func (t *FSTransport) SendUnary(ctx context.Context, sessionId string, req *Message) (*Message, error) {
 	if !t.HasSession(ctx, sessionId) {
 		return nil, fmt.Errorf("session does not exist")
 	}
 
 	// write data to file
-	reqFileName := t.requestPath(sessionId, reqId)
-	err := os.WriteFile(reqFileName, data, 0644)
+	reqFileName := t.requestPath(sessionId, req.ID)
+	err := os.WriteFile(reqFileName, req.Data, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("error writing request: %w", err)
 	}
 
 	// wait for response
-	bytes, err := t.waitForResponse(ctx, sessionId, reqId)
+	bytes, err := t.waitForResponse(ctx, sessionId, req.ID)
 	if err != nil {
 		return nil, fmt.Errorf("error receiving for response: %w", err)
 	}
 
-	return bytes, nil
+	resp := Message{
+		ID:   req.ID,
+		Data: bytes,
+	}
+	return &resp, nil
+}
+
+func (t *FSTransport) SendResponse(ctx context.Context, sessionId string, msg *Message) error {
+	return fmt.Errorf("not implemented")
 }
 
 func (t *FSTransport) GetLastRequestID(ctx context.Context, sessionId string) (int, error) {
@@ -138,58 +210,164 @@ func (t *FSTransport) GetLastRequestID(ctx context.Context, sessionId string) (i
 		return 0, fmt.Errorf("cannot read session directory: %w", err)
 	}
 
-	if len(entries) == 0 {
-		return 0, nil
+	var lastRequestID int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		reqID, err := parseRequestIdFromFilename(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		if reqID > lastRequestID {
+			lastRequestID = reqID
+		}
 	}
 
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
-	lastEntry := entries[len(entries)-1]
-	reqIDStr, err := parseRequestIdFromFilename(lastEntry.Name())
-	if err != nil {
-		return 0, fmt.Errorf("error reading last request: %w", err)
-	}
-	reqID, err := strconv.Atoi(reqIDStr)
-	if err != nil {
-		return 0, fmt.Errorf("error reading last request: %w", err)
-	}
-	return reqID, nil
+	return lastRequestID, nil
 }
 
 func (t *FSTransport) waitForResponse(ctx context.Context, sessionId string, reqId int) ([]byte, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // we only want to listen until we got our response
+
+	resPath := t.responsePath(sessionId, reqId)
+	out := make(chan string)
+	err := t.addSubscriber(ctx, func(ev *fsnotify.Event) {
+		if (ev.Has(fsnotify.Write) || ev.Has(fsnotify.Create)) && ev.Name == resPath {
+			out <- resPath // signal that it's there
+		}
+	}, func() {
+		close(out)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot add subscriber: %w", err)
+	}
+
+	<-out
+	return os.ReadFile(resPath)
+}
+
+func (t *FSTransport) SendStream(ctx context.Context, sessionId string, msg *Message) (<-chan *Message, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (t *FSTransport) addSubscriber(ctx context.Context, f func(ev *fsnotify.Event), done func()) error {
+	_, err := t.ensureWatcher()
+	if err != nil {
+		return err
+	}
+
+	t.subscribersMutex.Lock()
+	defer t.subscribersMutex.Unlock()
+
+	k := strconv.Itoa(rand.Int())
+	sub := make(chan *fsnotify.Event)
+	t.subscribers[k] = sub
+
+	go func() {
+		select {
+		case ev, more := <-sub:
+			if !more {
+				// channel was closed by removeSubscribers
+				return
+			}
+			f(ev)
+		case <-ctx.Done():
+			t.removeSubscribers(k) // also calls close(sub)
+		}
+		done()
+	}()
+
+	return nil
+}
+
+func (t *FSTransport) ensureWatcher() (*fsnotify.Watcher, error) {
+	t.watchMutex.Lock()
+	defer t.watchMutex.Unlock()
+
+	if t.watcher != nil {
+		return t.watcher, nil
+	}
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("cannot create watcher: %w", err)
 	}
-	defer watcher.Close()
 
-	err = watcher.Add(t.sessionPath(sessionId))
+	err = watcher.Add(t.sessionsPath())
 	if err != nil {
-		return nil, fmt.Errorf("cannot watch session path: %w", err)
+		watcher.Close()
+		return nil, fmt.Errorf("cannot watch sessions path: %w", err)
 	}
 
-	resPath := t.responsePath(sessionId, reqId)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case ev := <-watcher.Events:
-			if (ev.Has(fsnotify.Write) || ev.Has(fsnotify.Create)) && ev.Name == resPath {
-				return os.ReadFile(resPath)
+	go func() {
+		for {
+			select {
+			case ev, more := <-watcher.Events:
+				if !more {
+					return
+				}
+				t.pushToSubscribers(&ev)
+			case err, more := <-watcher.Errors:
+				if !more {
+					return
+				}
+				log.WithError(err).Error("watcher error")
 			}
-		case err := <-watcher.Errors:
-			return nil, fmt.Errorf("watcher error: %w", err)
 		}
+	}()
+	t.watcher = watcher
+
+	return t.watcher, nil
+}
+
+func (t *FSTransport) pushToSubscribers(ev *fsnotify.Event) {
+	t.subscribersMutex.Lock()
+
+	var toRemove []string
+	for k, s := range t.subscribers {
+		select {
+		case s <- ev:
+			// all good
+		default:
+			// receiver was blocked: mark it for removal
+			toRemove = append(toRemove, k)
+		}
+	}
+	t.subscribersMutex.Unlock()
+
+	if len(toRemove) > 0 {
+		// remove everybody who was too slow
+		t.removeSubscribers(toRemove...)
 	}
 }
 
-func (t *FSTransport) SendStream(ctx context.Context, sessionId string, id int, data []byte) (<-chan []byte, error) {
-	return nil, fmt.Errorf("not implemented")
+func (t *FSTransport) removeSubscribers(removals ...string) {
+	t.subscribersMutex.Lock()
+	defer t.subscribersMutex.Unlock()
+
+	for _, k := range removals {
+		log.WithField("subscriber", k).Info("removing subscriber")
+		sub, ok := t.subscribers[k]
+		if !ok {
+			continue
+		}
+
+		close(sub)
+		delete(t.subscribers, k)
+	}
+
+	// TODO(gpl): we should also check if we can close the watcher here
 }
 
 func (t *FSTransport) sessionsPath() string {
 	return path.Join(t.Config.Root, "sessions")
+}
+
+func (t *FSTransport) resolvePath(watcherPath string) string {
+	return path.Join(t.sessionsPath(), watcherPath)
 }
 
 func (t *FSTransport) sessionPath(sessionId string, parts ...string) string {
@@ -199,17 +377,27 @@ func (t *FSTransport) sessionPath(sessionId string, parts ...string) string {
 }
 
 func (t *FSTransport) requestPath(sessionId string, reqId int) string {
-	return t.sessionPath(sessionId, fmt.Sprintf("%d-res.yaml", reqId))
-}
-
-func (t *FSTransport) responsePath(sessionId string, reqId int) string {
 	return t.sessionPath(sessionId, fmt.Sprintf("%d-req.yaml", reqId))
 }
 
-func parseRequestIdFromFilename(fn string) (string, error) {
+func (t *FSTransport) responsePath(sessionId string, reqId int) string {
+	return t.sessionPath(sessionId, fmt.Sprintf("%d-res.yaml", reqId))
+}
+
+func parseRequestIdFromFilename(fn string) (int, error) {
 	parts := strings.Split(fn, "-")
-	if len(parts) < 1 {
-		return "", fmt.Errorf("invalid request filename: %s", fn)
+	if len(parts) < 2 || parts[1] != "req.yaml" {
+		return 0, fmt.Errorf("invalid request filename: %s", fn)
 	}
-	return parts[0], nil
+
+	return strconv.Atoi(parts[0])
+}
+
+func parseResponseIdFromFilename(fn string) (int, error) {
+	parts := strings.Split(fn, "-")
+	if len(parts) < 2 || parts[1] != "res.yaml" {
+		return 0, fmt.Errorf("invalid response filename: %s", fn)
+	}
+
+	return strconv.Atoi(parts[0])
 }
