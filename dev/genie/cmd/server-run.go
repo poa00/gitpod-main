@@ -5,6 +5,13 @@
 package cmd
 
 import (
+	"context"
+	"errors"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+
 	"github.com/spf13/cobra"
 
 	"github.com/gitpod-io/gitpod/common-go/log"
@@ -14,18 +21,30 @@ import (
 var serverRunCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run a genie server",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.ExactArgs(0),
 	Run: func(cmd *cobra.Command, args []string) {
-		configFile := args[0]
-
-		cfg, err := server.LoadConfig(configFile)
+		configPath, _ := cmd.Flags().GetString("config")
+		cfg, err := server.LoadConfig(configPath)
 		if err != nil {
 			log.WithError(err).Fatal("cannot load config")
 		}
 		server := server.NewGenieServer(cfg)
 
-		err = server.Run()
-		if err != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel = sync.OnceFunc(cancel)
+		defer cancel()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+		go func() {
+			<-sigChan
+			log.Println("received SIGTERM, quitting.")
+			cancel()
+		}()
+
+		err = server.Run(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			log.WithError(err).Fatal("error running server")
 		}
 	},

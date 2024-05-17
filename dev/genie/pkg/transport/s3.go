@@ -12,7 +12,7 @@ import (
 type S3Config struct {
 }
 
-var _ Transport = &FSTransport{}
+var _ Transport = &S3Transport{}
 
 type S3Transport struct {
 	Config *S3Config
@@ -30,6 +30,10 @@ func (t *S3Transport) CreateSession(ctx context.Context, sessionId string) error
 
 func (t *S3Transport) HasSession(ctx context.Context, sessionId string) bool {
 	return false
+}
+
+func (t *S3Transport) WatchSessions(ctx context.Context) (<-chan string, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 
 func (t *S3Transport) GetLastRequestID(ctx context.Context, sessionId string) (int, error) {

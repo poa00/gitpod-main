@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/gitpod-io/gitpod/common-go/log"
 )
 
 type FSConfig struct {
@@ -51,6 +52,59 @@ func (t *FSTransport) HasSession(ctx context.Context, sessionId string) bool {
 	// test if session dir exists
 	i, err := os.Stat(t.sessionPath(sessionId))
 	return err == nil && i.IsDir()
+}
+
+func (t *FSTransport) WatchSessions(ctx context.Context) (<-chan string, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, fmt.Errorf("cannot create watcher: %w", err)
+	}
+
+	sessionsPath := t.sessionsPath()
+	err = watcher.Add(sessionsPath)
+	if err != nil {
+		watcher.Close()
+		return nil, fmt.Errorf("cannot watch sessions path: %w", err)
+	}
+
+	out := make(chan string)
+	go func() {
+		defer watcher.Close()
+		defer close(out)
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		// send initial list of dirs
+		entries, err := os.ReadDir(sessionsPath)
+		if err != nil {
+			log.WithError(err).Error("error reading sessions dir")
+			return
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				out <- entry.Name()
+			}
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-watcher.Events:
+				if ev.Has(fsnotify.Create) {
+					dir, file := path.Split(ev.Name)
+					if dir == sessionsPath { // directly under "sessions"? then it's a new session
+						out <- file
+					}
+				}
+			case err := <-watcher.Errors:
+				log.WithError(err).Error("watcher error")
+				return
+			}
+		}
+	}()
+
+	return out, nil
 }
 
 func (t *FSTransport) SendUnary(ctx context.Context, sessionId string, reqId int, data []byte) ([]byte, error) {
@@ -134,8 +188,12 @@ func (t *FSTransport) SendStream(ctx context.Context, sessionId string, id int, 
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (t *FSTransport) sessionsPath() string {
+	return path.Join(t.Config.Root, "sessions")
+}
+
 func (t *FSTransport) sessionPath(sessionId string, parts ...string) string {
-	ps := []string{t.Config.Root, "sessions", sessionId}
+	ps := []string{t.sessionsPath(), sessionId}
 	ps = append(ps, parts...)
 	return path.Join(ps...)
 }

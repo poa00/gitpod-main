@@ -12,6 +12,7 @@ import (
 type Transport interface {
 	CreateSession(ctx context.Context, sessionId string) error
 	HasSession(ctx context.Context, sessionId string) bool
+	WatchSessions(ctx context.Context) (<-chan string, error)
 	GetLastRequestID(ctx context.Context, sessionId string) (int, error)
 
 	SendUnary(ctx context.Context, sessionId string, id int, data []byte) ([]byte, error)
