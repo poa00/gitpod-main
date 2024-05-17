@@ -23,10 +23,10 @@ import (
 
 type Config struct {
 	Transport transport.TransportConfig `yaml:"transport"`
-	Request   RequestConfig             `yaml:"request"`
+	Handler   HandlerConfig             `yaml:"handler"`
 }
 
-type RequestConfig struct {
+type HandlerConfig struct {
 	Binaries map[string]string                   `yaml:"binaries"`
 	Timeouts map[protocol.CallType]time.Duration `yaml:"timeouts"`
 }
@@ -92,7 +92,7 @@ func (g *GenieServer) addSessionHandlerIfNew(ctx context.Context, newSessionId s
 	if g.sessions[newSessionId] != nil {
 		return
 	}
-	h := NewSessionHandler(newSessionId, t, &g.Config.Request, func() {
+	h := NewSessionHandler(newSessionId, t, &g.Config.Handler, func() {
 		g.removeSessionHandler(newSessionId)
 	})
 	g.sessions[newSessionId] = h
@@ -125,11 +125,11 @@ type SessionHandler struct {
 	SessionID string
 
 	transport transport.Transport
-	config    *RequestConfig
+	config    *HandlerConfig
 	quitFn    func()
 }
 
-func NewSessionHandler(sessionID string, t transport.Transport, config *RequestConfig, quitFn func()) *SessionHandler {
+func NewSessionHandler(sessionID string, t transport.Transport, config *HandlerConfig, quitFn func()) *SessionHandler {
 	return &SessionHandler{
 		SessionID: sessionID,
 		transport: t,

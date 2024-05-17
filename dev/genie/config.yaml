@@ -1,4 +1,8 @@
 transport:
-  fs:
-    root: tmp/fstest
+  # fs:
+  #   root: tmp/fstest
+  #   pollInterval: 2s
+  s3:
+    bucket: gitpod-genie-test
+    region: eu-central-1
     pollInterval: 2s
