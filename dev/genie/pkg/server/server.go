@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -65,14 +66,12 @@ loop:
 		select {
 		case <-ctx.Done():
 			break loop
-		case newSession := <-watcher:
-			if g.sessions[newSession] == nil {
-				h := NewSessionHandler(t, newSession, func() {
-					g.removeSessionHandler(newSession)
-				})
-				g.addSessionHandler(newSession, h)
-				go h.Run(ctx)
+		case newSession, more := <-watcher:
+			if !more {
+				log.Info("watcher closed")
+				break loop
 			}
+			g.addSessionHandlerIfNew(ctx, newSession, t)
 		}
 	}
 	log.Info("stopped watching for new sessions")
@@ -82,11 +81,18 @@ loop:
 	return ctx.Err()
 }
 
-func (g *GenieServer) addSessionHandler(sessionID string, h *SessionHandler) {
+func (g *GenieServer) addSessionHandlerIfNew(ctx context.Context, newSessionId string, t transport.Transport) {
 	g.sessionsMutex.Lock()
 	defer g.sessionsMutex.Unlock()
 
-	g.sessions[sessionID] = h
+	if g.sessions[newSessionId] != nil {
+		return
+	}
+	h := NewSessionHandler(t, newSessionId, func() {
+		g.removeSessionHandler(newSessionId)
+	})
+	g.sessions[newSessionId] = h
+	go h.Run(ctx)
 }
 
 func (g *GenieServer) removeSessionHandler(sessionID string) {
@@ -133,14 +139,20 @@ func (h *SessionHandler) Run(ctx context.Context) {
 
 	requests, err := h.transport.WatchRequests(ctx, h.SessionID)
 	if err != nil {
-		log.WithError(err).WithField("sessionId", h.SessionID).Error("cannot watch requests")
+		log.WithError(err).Error("cannot watch requests")
 		return
 	}
+	log.Info("watching for new requests")
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-requests:
+		case msg, more := <-requests:
+			if !more {
+				log.Info("requests channel closed")
+				return
+			}
 			log.WithField("requestId", msg.ID).Info("received request")
 
 			req, err := protocol.UnmarshalRequest(msg.Data)
@@ -165,6 +177,20 @@ func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Reques
 	log := log.WithField("sessionId", h.SessionID).WithField("requestId", req.ID)
 	log.Info("handling request")
 
+	sendErrResponse := func(errMsg string) {
+		log.Error(errMsg)
+		res := &protocol.Response{
+			RequestID:  req.ID,
+			SequenceID: 0,
+			ExitCode:   -1,
+			Output:     fmt.Sprintf("error: %s", errMsg),
+		}
+		err := h.sendResponse(ctx, res)
+		if err != nil {
+			log.WithError(err).Error("error sending error response")
+		}
+	}
+
 	if req.Type != protocol.CallTypeUnary {
 		log.Error("unsupported request type")
 		return
@@ -172,13 +198,25 @@ func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Reques
 
 	// TODO(gpl) Support more :)
 	if req.Cmd != "kubectl" {
-		log.Error("unsupported command")
+		sendErrResponse("unsupported command")
+		return
+	}
+
+	if len(req.Args) < 1 {
+		sendErrResponse("auth: invalid args")
+		return
+	}
+
+	if req.Args[0] != "get" {
+		sendErrResponse("auth: command not allowed")
 		return
 	}
 
 	cmd := exec.Command("/usr/bin/kubectl", req.Args...)
-	stdoutBuf := bytes.Buffer{}
-	cmd.Stdout = &stdoutBuf
+	var stdBuffer bytes.Buffer
+	mw := io.MultiWriter(os.Stdout, &stdBuffer)
+	cmd.Stdout = mw
+	cmd.Stderr = mw
 
 	processDone := make(chan *os.ProcessState)
 	go func() {
@@ -212,12 +250,22 @@ func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Reques
 		RequestID:  req.ID,
 		SequenceID: 0,
 		ExitCode:   ps.ExitCode(),
-		Output:     stdoutBuf.String(),
+		Output:     stdBuffer.String(),
 	}
+	err := h.sendResponse(ctx, res)
+	if err != nil {
+		log.WithError(err).Error("error sending response")
+		return
+	}
+}
+
+func (h *SessionHandler) sendResponse(ctx context.Context, res *protocol.Response) error {
+	log := log.WithField("requestId", res.RequestID)
+	log.Info("sending response")
+
 	data, err := res.Marshal()
 	if err != nil {
-		log.WithError(err).Error("error marshalling response")
-		return
+		return fmt.Errorf("error marshalling response: %w", err)
 	}
 
 	mRes := transport.Message{
@@ -225,11 +273,11 @@ func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Reques
 		SequenceID: res.SequenceID,
 		Data:       data,
 	}
-	log.Info("sending response")
 	err = h.transport.SendResponse(ctx, h.SessionID, &mRes)
 	if err != nil {
-		log.WithError(err).Error("error sending response")
-		return
+		return err
 	}
+
 	log.Info("response sent")
+	return nil
 }

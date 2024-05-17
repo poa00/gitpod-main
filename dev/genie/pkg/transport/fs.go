@@ -62,7 +62,7 @@ func (t *FSTransport) HasSession(ctx context.Context, sessionId string) bool {
 }
 
 func (t *FSTransport) WatchSessions(ctx context.Context) (<-chan string, error) {
-	out := make(chan string)
+	out := make(chan string, 10)
 	sessionsPath := t.sessionsPath()
 	err := t.addSubscriber(ctx, func(ev *fsnotify.Event) {
 		if !ev.Has(fsnotify.Create) {
@@ -72,6 +72,7 @@ func (t *FSTransport) WatchSessions(ctx context.Context) (<-chan string, error) 
 		dir, file := path.Split(ev.Name)
 		if dir == sessionsPath {
 			// directly under "sessions"? then it's a new session
+			log.WithField("sessionId", file).Info("new session detected")
 			out <- file
 		}
 	}, func() {
@@ -98,7 +99,7 @@ func (t *FSTransport) WatchSessions(ctx context.Context) (<-chan string, error) 
 }
 
 func (t *FSTransport) WatchRequests(ctx context.Context, sessionId string) (<-chan *Message, error) {
-	out := make(chan *Message)
+	out := make(chan *Message, 10)
 
 	pushRequest := func(reqID int) {
 		fn := t.requestPath(sessionId, reqID)
@@ -197,7 +198,17 @@ func (t *FSTransport) SendUnary(ctx context.Context, sessionId string, req *Mess
 }
 
 func (t *FSTransport) SendResponse(ctx context.Context, sessionId string, msg *Message) error {
-	return fmt.Errorf("not implemented")
+	if !t.HasSession(ctx, sessionId) {
+		return fmt.Errorf("session does not exist")
+	}
+
+	// write data to file
+	resFileName := t.responsePath(sessionId, msg.ID)
+	err := os.WriteFile(resFileName, msg.Data, 0644)
+	if err != nil {
+		return fmt.Errorf("error writing response: %w", err)
+	}
+	return nil
 }
 
 func (t *FSTransport) GetLastRequestID(ctx context.Context, sessionId string) (int, error) {
@@ -263,21 +274,24 @@ func (t *FSTransport) addSubscriber(ctx context.Context, f func(ev *fsnotify.Eve
 	defer t.subscribersMutex.Unlock()
 
 	k := strconv.Itoa(rand.Int())
-	sub := make(chan *fsnotify.Event)
+	sub := make(chan *fsnotify.Event, 50)
 	t.subscribers[k] = sub
 
 	go func() {
-		select {
-		case ev, more := <-sub:
-			if !more {
-				// channel was closed by removeSubscribers
+		defer done()
+		for {
+			select {
+			case ev, more := <-sub:
+				if !more {
+					// channel was closed by removeSubscribers
+					return
+				}
+				f(ev)
+			case <-ctx.Done():
+				t.removeSubscribers(k) // also calls close(sub)
 				return
 			}
-			f(ev)
-		case <-ctx.Done():
-			t.removeSubscribers(k) // also calls close(sub)
 		}
-		done()
 	}()
 
 	return nil
@@ -296,10 +310,28 @@ func (t *FSTransport) ensureWatcher() (*fsnotify.Watcher, error) {
 		return nil, fmt.Errorf("cannot create watcher: %w", err)
 	}
 
-	err = watcher.Add(t.sessionsPath())
+	sessionsPath := t.sessionsPath()
+	err = watcher.Add(sessionsPath)
 	if err != nil {
 		watcher.Close()
 		return nil, fmt.Errorf("cannot watch sessions path: %w", err)
+	}
+
+	// register the initial list of sessions
+	existingSessions, err := os.ReadDir(sessionsPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read sessions directory: %w", err)
+	}
+	for _, sessionEntry := range existingSessions {
+		if !sessionEntry.IsDir() {
+			continue
+		}
+		_, sessionId := path.Split(sessionEntry.Name())
+		err := watcher.Add(t.sessionPath(sessionId))
+		if err != nil {
+			log.WithError(err).Warn("error watching existing session")
+		}
+		log.WithField("sessionId", sessionId).Info("watching existing session")
 	}
 
 	go func() {
@@ -309,6 +341,18 @@ func (t *FSTransport) ensureWatcher() (*fsnotify.Watcher, error) {
 				if !more {
 					return
 				}
+				log.WithField("fn", ev.Name).Debug("fs event")
+
+				// new session to watch?
+				if ev.Has(fsnotify.Create) {
+					dir, newSessionId := path.Split(ev.Name)
+					if dir == sessionsPath {
+						// directly under "sessions"? then it's a new session
+						err := watcher.Add(t.sessionPath(newSessionId))
+						log.WithError(err).Warn("error watching new session")
+					}
+				}
+
 				t.pushToSubscribers(&ev)
 			case err, more := <-watcher.Errors:
 				if !more {
@@ -327,12 +371,13 @@ func (t *FSTransport) pushToSubscribers(ev *fsnotify.Event) {
 	t.subscribersMutex.Lock()
 
 	var toRemove []string
-	for k, s := range t.subscribers {
+	for k, sub := range t.subscribers {
 		select {
-		case s <- ev:
+		case sub <- ev:
 			// all good
 		default:
 			// receiver was blocked: mark it for removal
+			log.Warn("subscriber too slow")
 			toRemove = append(toRemove, k)
 		}
 	}
@@ -364,10 +409,6 @@ func (t *FSTransport) removeSubscribers(removals ...string) {
 
 func (t *FSTransport) sessionsPath() string {
 	return path.Join(t.Config.Root, "sessions")
-}
-
-func (t *FSTransport) resolvePath(watcherPath string) string {
-	return path.Join(t.sessionsPath(), watcherPath)
 }
 
 func (t *FSTransport) sessionPath(sessionId string, parts ...string) string {
