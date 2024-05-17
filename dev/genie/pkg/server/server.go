@@ -21,11 +21,14 @@ import (
 	"github.com/gitpod-io/gitpod/genie/pkg/transport"
 )
 
-const DEFAULT_REQUEST_TIMEOUT = 5000
-
 type Config struct {
 	Transport transport.TransportConfig `yaml:"transport"`
-	Binaries  map[string]string         `yaml:"binaries"`
+	Request   RequestConfig             `yaml:"request"`
+}
+
+type RequestConfig struct {
+	Binaries map[string]string                   `yaml:"binaries"`
+	Timeouts map[protocol.CallType]time.Duration `yaml:"timeouts"`
 }
 
 type GenieServer struct {
@@ -89,7 +92,7 @@ func (g *GenieServer) addSessionHandlerIfNew(ctx context.Context, newSessionId s
 	if g.sessions[newSessionId] != nil {
 		return
 	}
-	h := NewSessionHandler(newSessionId, t, g.Config.Binaries, func() {
+	h := NewSessionHandler(newSessionId, t, &g.Config.Request, func() {
 		g.removeSessionHandler(newSessionId)
 	})
 	g.sessions[newSessionId] = h
@@ -122,15 +125,15 @@ type SessionHandler struct {
 	SessionID string
 
 	transport transport.Transport
-	binaries  map[string]string
+	config    *RequestConfig
 	quitFn    func()
 }
 
-func NewSessionHandler(sessionID string, t transport.Transport, binaries map[string]string, quitFn func()) *SessionHandler {
+func NewSessionHandler(sessionID string, t transport.Transport, config *RequestConfig, quitFn func()) *SessionHandler {
 	return &SessionHandler{
 		SessionID: sessionID,
 		transport: t,
-		binaries:  binaries,
+		config:    config,
 		quitFn:    quitFn,
 	}
 }
@@ -171,11 +174,12 @@ func (h *SessionHandler) Run(ctx context.Context) {
 }
 
 func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Request) {
-	requestTimeout := req.Context.Timeout
-	if requestTimeout == 0 || requestTimeout > DEFAULT_REQUEST_TIMEOUT {
-		requestTimeout = DEFAULT_REQUEST_TIMEOUT
+	requestTimeout := time.Duration(req.Context.Timeout) * time.Millisecond
+	defaultTimeout := h.config.Timeouts[req.Type]
+	if requestTimeout == 0 || requestTimeout.Milliseconds() > defaultTimeout.Milliseconds() {
+		requestTimeout = defaultTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(requestTimeout)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 
 	log := log.WithField("sessionId", h.SessionID).WithField("requestId", req.ID)
@@ -216,7 +220,7 @@ func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Reques
 		return
 	}
 
-	binary, ok := h.binaries[req.Cmd]
+	binary, ok := h.config.Binaries[req.Cmd]
 	if !ok {
 		sendErrResponse("no binary configured for cmd: " + req.Cmd)
 		return

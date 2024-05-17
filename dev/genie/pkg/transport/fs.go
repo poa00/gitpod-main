@@ -61,6 +61,8 @@ func (t *FSTransport) HasSession(ctx context.Context, sessionId string) bool {
 }
 
 func (t *FSTransport) WatchSessions(ctx context.Context) (<-chan string, error) {
+	_ = os.MkdirAll(t.sessionsPath(), 0755)
+
 	out := make(chan string, 10)
 
 	existingSessions := map[string]struct{}{}

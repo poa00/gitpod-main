@@ -2,5 +2,9 @@ transport:
   fs:
     root: tmp/fstest
     pollInterval: 2s
-binaries:
-  kubectl: /usr/bin/kubectl
+request:
+  binaries:
+    kubectl: /usr/bin/kubectl
+  timeouts:
+    unary: 10s
+    stream: 10m
