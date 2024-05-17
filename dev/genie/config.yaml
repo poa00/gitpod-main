@@ -1,0 +1,4 @@
+transport:
+  fs:
+    root: tmp/fstest
+current_session: 2024_05_17_08_11-test1

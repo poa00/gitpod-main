@@ -31,7 +31,7 @@ const (
 
 type Context struct {
 	// Timeout is the maximum time the request is allowed to take in milliseconds
-	Timeout int `yaml:"timeout"`
+	Timeout int `yaml:"timeout,omitempty"`
 }
 
 type Response struct {

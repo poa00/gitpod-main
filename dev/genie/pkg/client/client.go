@@ -60,11 +60,17 @@ func (c *Client) Send(ctx context.Context, req *protocol.Request) (*protocol.Res
 		return nil, fmt.Errorf("streaming requests are not supported yet")
 	}
 
+	reqID, err := c.Transport.GetLastRequestID(ctx, req.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("error preparing request: %w", err)
+	}
+	req.ID = reqID + 1
+
 	data, err := yaml.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("error serializing request: %w", err)
 	}
-	resData, err := c.Transport.SendUnary(ctx, req.SessionID, fmt.Sprintf("%d", req.ID), data)
+	resData, err := c.Transport.SendUnary(ctx, req.SessionID, req.ID, data)
 	if err != nil {
 		return nil, fmt.Errorf("error sending request: %w", err)
 	}

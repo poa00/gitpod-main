@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2024 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -33,7 +33,7 @@ var sessionCreateCmd = &cobra.Command{
 		ctx := context.Background()
 		sessionId, err := cl.CreateSession(ctx, name)
 		if err != nil {
-			log.WithError(err).WithField("session_name", name).Error("error creating session")
+			log.WithError(err).WithField("session_name", name).Fatal("error creating session")
 		}
 
 		cl.Config.CurrentSession = sessionId
@@ -46,7 +46,5 @@ var sessionCreateCmd = &cobra.Command{
 }
 
 func init() {
-	clientSessionCmd.AddCommand(kubectlCmd)
-
-	rootCmd.PersistentFlags().StringP("config", "c", "./config.yaml", "Path to the config file")
+	clientSessionCmd.AddCommand(sessionCreateCmd)
 }

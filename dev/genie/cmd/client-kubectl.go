@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Gitpod GmbH. All rights reserved.
+// Copyright (c) 2024 Gitpod GmbH. All rights reserved.
 // Licensed under the GNU Affero General Public License (AGPL).
 // See License.AGPL.txt in the project root for license information.
 
@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -28,7 +29,9 @@ var kubectlCmd = &cobra.Command{
 			log.WithError(err).Fatal("error creating client")
 		}
 
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
 		sessionId, err := cl.EnsureSession(ctx)
 		if err != nil {
 			log.WithError(err).WithField("session_id", sessionId).Error("error ensuring session")
@@ -42,7 +45,7 @@ var kubectlCmd = &cobra.Command{
 		}
 		res, err := cl.Send(ctx, &req)
 		if err != nil {
-			log.WithError(err).WithField("session_id", sessionId).WithField("request_id", req.ID).Error("error sending request")
+			log.WithError(err).WithField("session_id", sessionId).WithField("request_id", req.ID).Fatal("error sending request")
 		}
 
 		fmt.Println(res.Output)
@@ -51,7 +54,5 @@ var kubectlCmd = &cobra.Command{
 }
 
 func init() {
-	clientSessionCmd.AddCommand(kubectlCmd)
-
-	rootCmd.PersistentFlags().StringP("config", "c", "./config.yaml", "Path to the config file")
+	clientCmd.AddCommand(kubectlCmd)
 }

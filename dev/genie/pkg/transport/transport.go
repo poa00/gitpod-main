@@ -10,11 +10,12 @@ import (
 )
 
 type Transport interface {
-	CreateSession(ctx context.Context, id string) error
-	HasSession(ctx context.Context, id string) bool
+	CreateSession(ctx context.Context, sessionId string) error
+	HasSession(ctx context.Context, sessionId string) bool
+	GetLastRequestID(ctx context.Context, sessionId string) (int, error)
 
-	SendUnary(ctx context.Context, sessionId, id string, data []byte) ([]byte, error)
-	SendStream(ctx context.Context, sessionId, id string, data []byte) (<-chan []byte, error)
+	SendUnary(ctx context.Context, sessionId string, id int, data []byte) ([]byte, error)
+	SendStream(ctx context.Context, sessionId string, id int, data []byte) (<-chan []byte, error)
 }
 
 type TransportConfig struct {
