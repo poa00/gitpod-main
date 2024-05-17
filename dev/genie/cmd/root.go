@@ -7,6 +7,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -24,6 +25,16 @@ var rootCmd = &cobra.Command{
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	common_grpc.SetupLogging()
+
+	// for convenience: provided client-side shortcuts
+	filename := filepath.Base(os.Args[0])
+	if filename == "kubectl" {
+		if err := kubectlCmd.Execute(); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)

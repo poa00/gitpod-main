@@ -55,4 +55,6 @@ var kubectlCmd = &cobra.Command{
 
 func init() {
 	clientCmd.AddCommand(kubectlCmd)
+
+	kubectlCmd.DisableFlagParsing = true
 }
