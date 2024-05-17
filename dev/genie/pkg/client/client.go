@@ -48,7 +48,7 @@ func (c *Client) CreateSession(ctx context.Context, name string) (string, error)
 }
 
 func (c *Client) EnsureSession(ctx context.Context) (string, error) {
-	currentSessionID := c.Config.CurrentSession
+	currentSessionID := os.Getenv("GENIE_SESSION")
 	if !c.Transport.HasSession(ctx, currentSessionID) {
 		return currentSessionID, fmt.Errorf("current session does not exist")
 	}
@@ -117,18 +117,4 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return c, nil
-}
-
-func StoreConfig(path string, c *Config) error {
-	bytes, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("Error serializing config file: %v", err)
-	}
-
-	err = os.WriteFile(path, bytes, 0644)
-	if err != nil {
-		return fmt.Errorf("Error writing config file: %v", err)
-	}
-
-	return nil
 }

@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
@@ -15,9 +16,10 @@ import (
 
 // sessionCreateCmd represents the describe command
 var sessionCreateCmd = &cobra.Command{
-	Use:   "create <name>",
-	Short: "creates a new session with that name",
-	Args:  cobra.ExactArgs(1),
+	Use:     "create <name>",
+	Short:   "creates a new session with that name",
+	Example: "export GENIE_SESSION=$(genie client session create my-session)",
+	Args:    cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		name := args[0]
 		if name == "" {
@@ -35,13 +37,7 @@ var sessionCreateCmd = &cobra.Command{
 		if err != nil {
 			log.WithError(err).WithField("session_name", name).Fatal("error creating session")
 		}
-
-		cl.Config.CurrentSession = sessionId
-		err = client.StoreConfig(configPath, cl.Config)
-		if err != nil {
-			log.WithError(err).WithField("session_id", sessionId).Fatal("updating current session")
-		}
-		log.WithField("session_id", sessionId).Info("session created and set as current session")
+		fmt.Println(sessionId)
 	},
 }
 

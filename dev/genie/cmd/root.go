@@ -29,10 +29,7 @@ func Execute() {
 	// for convenience: provided client-side shortcuts
 	filename := filepath.Base(os.Args[0])
 	if filename == "kubectl" {
-		if err := kubectlCmd.Execute(); err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+		kubectlCmdDirect(os.Args[1:])
 		return
 	}
 

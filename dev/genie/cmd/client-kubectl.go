@@ -53,6 +53,30 @@ var kubectlCmd = &cobra.Command{
 	},
 }
 
+// kubectlCmdDirect allows run run "kubectl" command directly, with minimal command line parsing
+func kubectlCmdDirect(args []string) {
+	var cmd *cobra.Command
+	var flags []string
+	var err error
+	if kubectlCmd.TraverseChildren {
+		cmd, flags, err = kubectlCmd.Traverse(args)
+		if err != nil {
+			log.WithError(err).Fatal("error traversing kubectl command")
+		}
+	} else {
+		cmd, flags, err = kubectlCmd.Find(args)
+		if err != nil {
+			log.WithError(err).Fatal("error finding args for kubectl command")
+		}
+	}
+
+	err = cmd.ParseFlags(flags)
+	if err != nil {
+		log.WithError(err).Fatal("error parsing kubectl flags")
+	}
+	cmd.Run(kubectlCmd, flags)
+}
+
 func init() {
 	clientCmd.AddCommand(kubectlCmd)
 
