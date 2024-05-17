@@ -2,4 +2,5 @@ transport:
   fs:
     root: tmp/fstest
     pollInterval: 2s
-current_session: 2024_05_17_16_52-test3
+binaries:
+  kubectl: /usr/bin/kubectl

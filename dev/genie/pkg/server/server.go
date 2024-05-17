@@ -25,6 +25,7 @@ const DEFAULT_REQUEST_TIMEOUT = 5000
 
 type Config struct {
 	Transport transport.TransportConfig `yaml:"transport"`
+	Binaries  map[string]string         `yaml:"binaries"`
 }
 
 type GenieServer struct {
@@ -88,7 +89,7 @@ func (g *GenieServer) addSessionHandlerIfNew(ctx context.Context, newSessionId s
 	if g.sessions[newSessionId] != nil {
 		return
 	}
-	h := NewSessionHandler(t, newSessionId, func() {
+	h := NewSessionHandler(newSessionId, t, g.Config.Binaries, func() {
 		g.removeSessionHandler(newSessionId)
 	})
 	g.sessions[newSessionId] = h
@@ -119,14 +120,17 @@ func LoadConfig(path string) (*Config, error) {
 
 type SessionHandler struct {
 	SessionID string
+
 	transport transport.Transport
+	binaries  map[string]string
 	quitFn    func()
 }
 
-func NewSessionHandler(t transport.Transport, sessionID string, quitFn func()) *SessionHandler {
+func NewSessionHandler(sessionID string, t transport.Transport, binaries map[string]string, quitFn func()) *SessionHandler {
 	return &SessionHandler{
 		SessionID: sessionID,
 		transport: t,
+		binaries:  binaries,
 		quitFn:    quitFn,
 	}
 }
@@ -207,14 +211,20 @@ func (h *SessionHandler) handleRequest(ctx context.Context, req *protocol.Reques
 		return
 	}
 
-	if req.Args[0] != "get" {
+	if req.Args[0] != "get" && req.Args[0] != "describe" {
 		sendErrResponse("auth: command not allowed")
 		return
 	}
 
-	cmd := exec.Command("/usr/bin/kubectl", req.Args...)
+	binary, ok := h.binaries[req.Cmd]
+	if !ok {
+		sendErrResponse("no binary configured for cmd: " + req.Cmd)
+		return
+	}
+
+	cmd := exec.Command(binary, req.Args...)
 	var stdBuffer bytes.Buffer
-	mw := io.MultiWriter(os.Stdout, &stdBuffer)
+	mw := io.MultiWriter(&stdBuffer)
 	cmd.Stdout = mw
 	cmd.Stderr = mw
 
