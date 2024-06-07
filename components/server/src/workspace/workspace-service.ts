@@ -350,18 +350,36 @@ export class WorkspaceService {
         const infos = await this.db.findRunningInstancesWithWorkspaces(undefined, targetUserId);
         await Promise.all(
             infos.map(async (info) => {
-                await this.auth.checkPermissionOnWorkspace(userId, "stop", info.workspace.id);
-                await this.workspaceStarter.stopWorkspaceInstance(
-                    ctx,
+                await this.doStopWorkspaceInstance(
+                    userId,
+                    info.workspace.id,
                     info.latestInstance.id,
                     info.latestInstance.region,
                     reason,
                     policy,
                 );
-                this.asyncUpdateDeletionEligabilityTime(userId, info.workspace.id);
+                await this.auth.checkPermissionOnWorkspace(userId, "stop", info.workspace.id);
             }),
         );
         return infos.map((instance) => instance.workspace);
+    }
+
+    private async doStopWorkspaceInstance(
+        userId: string,
+        workspaceId: string,
+        instanceId: string,
+        region: string,
+        reason: string,
+        policy?: StopWorkspacePolicy,
+    ) {
+        await this.auth.checkPermissionOnWorkspace(userId, "stop", workspaceId);
+
+        try {
+            await this.workspaceStarter.stopWorkspaceInstance({}, instanceId, region, reason, policy);
+            this.asyncUpdateDeletionEligabilityTime(userId, workspaceId);
+        } catch (err) {
+            throw mapGrpcError(err);
+        }
     }
 
     private asyncUpdateDeletionEligabilityTimeForUsedPrebuild(userId: string, workspace: Workspace): void {
@@ -498,29 +516,34 @@ export class WorkspaceService {
         const instance = await this.getCurrentInstance(userId, workspaceId);
         const req = new DescribeWorkspaceRequest();
         req.setId(instance.id);
-        const client = await this.clientProvider.get(instance.region);
-        const desc = await client.describeWorkspace({}, req);
 
-        if (!desc.hasStatus()) {
-            // This may happen if the instance is not "runing"
-            throw new ApplicationError(ErrorCodes.CONFLICT, "describeWorkspace returned no status");
+        try {
+            const client = await this.clientProvider.get(instance.region);
+            const desc = await client.describeWorkspace({}, req);
+
+            if (!desc.hasStatus()) {
+                // This may happen if the instance is not "runing"
+                throw new ApplicationError(ErrorCodes.CONFLICT, "describeWorkspace returned no status");
+            }
+
+            const status = desc.getStatus()!;
+            const ports = status
+                .getSpec()!
+                .getExposedPortsList()
+                .map(
+                    (p) =>
+                        <WorkspaceInstancePort>{
+                            port: p.getPort(),
+                            url: p.getUrl(),
+                            visibility: this.portVisibilityFromProto(p.getVisibility()),
+                            protocol: this.portProtocolFromProto(p.getProtocol()),
+                        },
+                );
+
+            return ports;
+        } catch (err) {
+            throw mapGrpcError(err);
         }
-
-        const status = desc.getStatus()!;
-        const ports = status
-            .getSpec()!
-            .getExposedPortsList()
-            .map(
-                (p) =>
-                    <WorkspaceInstancePort>{
-                        port: p.getPort(),
-                        url: p.getUrl(),
-                        visibility: this.portVisibilityFromProto(p.getVisibility()),
-                        protocol: this.portProtocolFromProto(p.getProtocol()),
-                    },
-            );
-
-        return ports;
     }
 
     public async openPort(
@@ -577,8 +600,12 @@ export class WorkspaceService {
         req.setSpec(spec);
         req.setExpose(false);
 
-        const client = await this.clientProvider.get(instance.region);
-        await client.controlPort({}, req);
+        try {
+            const client = await this.clientProvider.get(instance.region);
+            await client.controlPort({}, req);
+        } catch (err) {
+            throw mapGrpcError(err);
+        }
     }
 
     private portVisibilityFromProto(visibility: ProtoPortVisibility): PortVisibility {
@@ -869,13 +896,17 @@ export class WorkspaceService {
         }
         await check(instance, workspace);
 
-        const req = new DescribeWorkspaceRequest();
-        req.setId(instance.id);
-        const client = await this.clientProvider.get(instance.region);
-        const desc = await client.describeWorkspace({}, req);
-        const duration = desc.getStatus()!.getSpec()!.getTimeout();
+        try {
+            const req = new DescribeWorkspaceRequest();
+            req.setId(instance.id);
+            const client = await this.clientProvider.get(instance.region);
+            const desc = await client.describeWorkspace({}, req);
+            const duration = desc.getStatus()!.getSpec()!.getTimeout();
 
-        return { duration, canChange, humanReadableDuration: goDurationToHumanReadable(duration) };
+            return { duration, canChange, humanReadableDuration: goDurationToHumanReadable(duration) };
+        } catch (err) {
+            throw mapGrpcError(err);
+        }
     }
 
     public async setWorkspaceTimeout(
@@ -903,12 +934,15 @@ export class WorkspaceService {
             throw new ApplicationError(ErrorCodes.NOT_FOUND, "Can only set keep-alive for regular, running workspaces");
         }
         await check(instance, workspace);
-
-        const client = await this.clientProvider.get(instance.region);
-        const req = new SetTimeoutRequest();
-        req.setId(instance.id);
-        req.setDuration(validatedDuration);
-        await client.setTimeout({}, req);
+        try {
+            const client = await this.clientProvider.get(instance.region);
+            const req = new SetTimeoutRequest();
+            req.setId(instance.id);
+            req.setDuration(validatedDuration);
+            await client.setTimeout({}, req);
+        } catch (err) {
+            throw mapGrpcError(err);
+        }
 
         return {
             resetTimeoutOnWorkspaces: [workspace.id],
@@ -1207,8 +1241,12 @@ export class WorkspaceService {
             req.setId(instanceId);
             req.setClosed(wasClosed);
 
-            const client = await this.clientProvider.get(instance.region);
-            await client.markActive({}, req);
+            try {
+                const client = await this.clientProvider.get(instance.region);
+                await client.markActive({}, req);
+            } catch (err) {
+                throw mapGrpcError(err);
+            }
         } catch (e) {
             if (e.message && typeof e.message === "string" && (e.message as String).endsWith("does not exist")) {
                 // This is an old tab with open workspace: drop silently
@@ -1256,8 +1294,12 @@ export class WorkspaceService {
             req.setId(instance.id);
             req.setLevel(lvlmap.get(level)!);
 
-            const client = await this.clientProvider.get(instance.region);
-            await client.controlAdmission({}, req);
+            try {
+                const client = await this.clientProvider.get(instance.region);
+                await client.controlAdmission({}, req);
+            } catch (err) {
+                throw mapGrpcError(err);
+            }
         }
         log.info({ userId, workspaceId }, "Admission level changed", { level });
         await this.db.transaction(async (db) => {
@@ -1329,13 +1371,7 @@ export class WorkspaceService {
             const resp = await client.takeSnapshot({}, request);
             snapshotUrl = resp.getUrl();
         } catch (err) {
-            if (isClusterMaintenanceError(err)) {
-                throw new ApplicationError(
-                    ErrorCodes.PRECONDITION_FAILED,
-                    "Cannot take a snapshot because the workspace cluster is under maintenance. Please try again in a few minutes",
-                );
-            }
-            throw err;
+            throw mapGrpcError(err);
         }
         const snapshot = await this.snapshotService.createSnapshot(options, snapshotUrl);
 
@@ -1376,6 +1412,13 @@ export class WorkspaceService {
 export function mapGrpcError(err: any): Error {
     if (!isGrpcError(err)) {
         return err;
+    }
+
+    if (isClusterMaintenanceError(err)) {
+        return new ApplicationError(
+            ErrorCodes.PRECONDITION_FAILED,
+            "Cannot perform operation because the workspace cluster is under maintenance. Please try again in a few minutes",
+        );
     }
 
     switch (err.code) {
